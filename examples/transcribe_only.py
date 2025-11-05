@@ -12,8 +12,16 @@ Usage:
     # With custom vocabulary and corrections
     python transcribe_only.py /path/to/video.mp4 --vocabulary vocab.yaml --corrections corrections.yaml
 
+    # With LLM corrections (slow but context-aware)
+    python transcribe_only.py /path/to/video.mp4 --corrections corrections.yaml --enable-llm-corrections --domain-context "Ad tech platform"
+
     # All features combined
-    python transcribe_only.py /path/to/video.mp4 --speaker-db speakers.json --vocabulary vocab.yaml --corrections corrections.yaml
+    python transcribe_only.py /path/to/video.mp4 \
+        --speaker-db speakers.json \
+        --vocabulary vocab.yaml \
+        --corrections corrections.yaml \
+        --enable-llm-corrections \
+        --domain-context "Ad tech platform"
 
     # Without diarization
     python transcribe_only.py /path/to/video.mp4 --no-diarization
@@ -70,6 +78,28 @@ def main() -> None:
         type=Path,
         help="Path to corrections YAML (applies dictionary-based fixes)",
     )
+    parser.add_argument(
+        "--enable-llm-corrections",
+        action="store_true",
+        help="Enable LLM-based corrections via Ollama (slow but context-aware)",
+    )
+    parser.add_argument(
+        "--ollama-url",
+        type=str,
+        default="http://localhost:11434",
+        help="Ollama API URL (default: http://localhost:11434)",
+    )
+    parser.add_argument(
+        "--ollama-model",
+        type=str,
+        default="llama3.2",
+        help="Ollama model for LLM corrections (default: llama3.2)",
+    )
+    parser.add_argument(
+        "--domain-context",
+        type=str,
+        help="Domain context for LLM corrections (e.g., 'Ad tech platform')",
+    )
 
     args = parser.parse_args()
 
@@ -85,6 +115,10 @@ def main() -> None:
         speaker_db_path=args.speaker_db,
         vocabulary_path=args.vocabulary,
         corrections_path=args.corrections,
+        enable_llm_corrections=args.enable_llm_corrections,
+        ollama_url=args.ollama_url,
+        ollama_model=args.ollama_model,
+        domain_context=args.domain_context,
     )
 
     # Transcribe

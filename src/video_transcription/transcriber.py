@@ -12,6 +12,7 @@ from pydantic import BaseModel
 from pyannote.audio import Pipeline
 
 from .corrector import DictionaryCorrector
+from .llm_corrector import LLMCorrector
 from .speaker_db import SpeakerDatabase
 from .vocabulary import VocabularyManager
 
@@ -44,6 +45,10 @@ class VideoTranscriber:
         speaker_db_path: Optional[Path] = None,
         vocabulary_path: Optional[Path] = None,
         corrections_path: Optional[Path] = None,
+        enable_llm_corrections: bool = False,
+        ollama_url: str = "http://localhost:11434",
+        ollama_model: str = "llama3.2",
+        domain_context: Optional[str] = None,
     ):
         """
         Initialize the transcriber with MLX-accelerated Whisper for Apple Silicon.
@@ -55,11 +60,16 @@ class VideoTranscriber:
             speaker_db_path: Path to speaker database JSON (enables speaker identification)
             vocabulary_path: Path to vocabulary YAML (improves recognition of custom terms)
             corrections_path: Path to corrections YAML (applies dictionary-based fixes)
+            enable_llm_corrections: Enable LLM-based corrections via Ollama
+            ollama_url: URL for Ollama API
+            ollama_model: Ollama model for corrections
+            domain_context: Optional domain context for LLM corrections
 
         Note:
             MLX automatically uses GPU acceleration on Apple Silicon (M1/M2/M3).
             Diarization pipeline will use MPS (Metal Performance Shaders) if available.
             Speaker identification, vocabulary, and corrections are optional enhancements.
+            LLM corrections are the slowest tier and optional (requires Ollama running).
         """
         self.model_name = model_name
         self.enable_diarization = enable_diarization
@@ -70,9 +80,14 @@ class VideoTranscriber:
         self.speaker_db_path = speaker_db_path
         self.vocabulary_path = vocabulary_path
         self.corrections_path = corrections_path
+        self.enable_llm_corrections = enable_llm_corrections
+        self.ollama_url = ollama_url
+        self.ollama_model = ollama_model
+        self.domain_context = domain_context
         self._speaker_db: Optional[SpeakerDatabase] = None
         self._vocabulary: Optional[VocabularyManager] = None
         self._corrector: Optional[DictionaryCorrector] = None
+        self._llm_corrector: Optional[LLMCorrector] = None
 
     @property
     def speaker_db(self) -> Optional[SpeakerDatabase]:
@@ -101,6 +116,17 @@ class VideoTranscriber:
             print(f"Loading corrections from {self.corrections_path}...")
             self._corrector = DictionaryCorrector(self.corrections_path)
         return self._corrector
+
+    @property
+    def llm_corrector(self) -> Optional[LLMCorrector]:
+        """Lazy-load LLM corrector."""
+        if self._llm_corrector is None and self.enable_llm_corrections:
+            print(f"Initializing LLM corrector (Ollama: {self.ollama_model})...")
+            self._llm_corrector = LLMCorrector(
+                ollama_url=self.ollama_url,
+                model=self.ollama_model
+            )
+        return self._llm_corrector
 
     def _load_diarization_pipeline(self) -> None:
         """Load the speaker diarization pipeline."""
@@ -364,6 +390,22 @@ class VideoTranscriber:
                 full_text, stats = self.corrector.correct(full_text)
                 if stats.total_corrections > 0:
                     print(f"✓ Applied {stats.total_corrections} dictionary corrections")
+
+            # Apply LLM corrections if enabled
+            if self.llm_corrector:
+                try:
+                    print("Applying LLM-based corrections (this may take a while)...")
+                    full_text, llm_stats = self.llm_corrector.correct(
+                        full_text, domain_context=self.domain_context
+                    )
+                    print(
+                        f"✓ LLM corrections complete: {llm_stats.chunks_processed} chunks processed"
+                    )
+                    if llm_stats.failed_chunks > 0:
+                        print(f"  ⚠ {llm_stats.failed_chunks} chunks failed (using original)")
+                except Exception as e:
+                    print(f"⚠ LLM corrections failed: {e}")
+                    print("  Continuing with dictionary-corrected text...")
 
             return TranscriptionResult(
                 segments=segments, language=result["language"], full_text=full_text
