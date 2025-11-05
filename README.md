@@ -364,7 +364,7 @@ learn_corrections.py <original.txt> <edited.txt> [--auto-approve] [--dry-run]
 
 | Model  | Size  | Time (1h video) | WER  | Quality | Recommended |
 |--------|-------|-----------------|------|---------|-------------|
-| tiny   | 39M   | ~8 min          | 7.5% | Basic   | Testing only |
+| tiny   | 39M   | ~8 min          | 7.5% | Basic   | ⚠️ **Testing only** |
 | base   | 74M   | ~12 min         | 5.0% | Good    | Quick drafts |
 | small  | 244M  | ~15 min         | 3.4% | Better  | ⭐ Balance |
 | medium | 769M  | ~25 min         | 2.9% | Great   | ✅ Default |
@@ -372,6 +372,22 @@ learn_corrections.py <original.txt> <edited.txt> [--auto-approve] [--dry-run]
 | turbo  | 809M  | ~20 min         | ~3.0% | Great   | Speed |
 
 **Note**: Times for M1 Max with MLX. WER = Word Error Rate (lower is better).
+
+### ⚠️ Important: Tiny Model Limitations
+
+**DO NOT use the `tiny` model for production or real transcriptions!** The tiny model has serious quality issues:
+
+- **Hallucination prone**: Often produces repetitive output like "then then then then..."
+- **High error rate**: 7.5% WER means ~1 in 13 words is wrong
+- **Poor technical terms**: Struggles with domain-specific vocabulary
+- **Unreliable output**: May produce unusable transcripts
+
+The tiny model is **ONLY** suitable for:
+- Quick system testing
+- Verifying your installation works
+- Development/debugging
+
+**For actual transcriptions, use at minimum the `small` model (3.4% WER, ~15 min/hour).**
 
 ## Performance Tips
 

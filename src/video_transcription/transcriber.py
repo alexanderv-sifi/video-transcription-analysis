@@ -1,9 +1,10 @@
 """Audio transcription using Whisper with speaker diarization."""
 
 import os
+import re
 import tempfile
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import ffmpeg
 import mlx_whisper
@@ -76,6 +77,22 @@ class VideoTranscriber:
         self.hf_token = hf_token or os.getenv("HF_TOKEN")
         self.diarization_pipeline: Optional[Pipeline] = None
 
+        # Warn about tiny model quality issues
+        if model_name == "tiny":
+            print("\n" + "=" * 60)
+            print("⚠ WARNING: Using 'tiny' model")
+            print("=" * 60)
+            print("The tiny model is ONLY for testing and has serious limitations:")
+            print("  - High word error rate (7.5%)")
+            print("  - Prone to hallucination (repetitive output)")
+            print("  - Poor handling of technical terms")
+            print("  - Unreliable for production use")
+            print("\nRecommended models:")
+            print("  - small:  Better quality, ~15 min for 1h video")
+            print("  - medium: Best balance, ~25 min for 1h video (DEFAULT)")
+            print("  - turbo:  Fast and good, ~20 min for 1h video")
+            print("=" * 60 + "\n")
+
         # Optional enhancement modules (lazy-loaded)
         self.speaker_db_path = speaker_db_path
         self.vocabulary_path = vocabulary_path
@@ -140,9 +157,10 @@ class VideoTranscriber:
                 return
 
             try:
+                # pyannote.audio 3.x uses 'use_auth_token', 4.x uses 'token'
                 self.diarization_pipeline = Pipeline.from_pretrained(
                     "pyannote/speaker-diarization-3.1",
-                    token=self.hf_token
+                    use_auth_token=self.hf_token
                 )
 
                 # Optimize for Apple Silicon MPS if available
@@ -359,10 +377,18 @@ class VideoTranscriber:
                 if initial_prompt:
                     print(f"✓ Using vocabulary hints ({len(initial_prompt)} chars)")
 
+            # Build correct model path (naming is inconsistent in mlx-community)
+            # tiny and turbo: no -mlx suffix
+            # base, small, medium, large: -mlx suffix
+            if self.model_name in ["tiny", "turbo"]:
+                model_path = f"mlx-community/whisper-{self.model_name}"
+            else:
+                model_path = f"mlx-community/whisper-{self.model_name}-mlx"
+
             print(f"Transcribing audio with MLX-accelerated Whisper ({self.model_name})...")
             result = mlx_whisper.transcribe(
                 str(audio_path),
-                path_or_hf_repo=f"mlx-community/whisper-{self.model_name}",
+                path_or_hf_repo=model_path,
                 verbose=False,
                 initial_prompt=initial_prompt if initial_prompt else None
             )
@@ -384,6 +410,18 @@ class VideoTranscriber:
 
             # Build full text with speaker labels
             full_text = self._build_full_text(segments)
+
+            # Detect and clean repetition (hallucination)
+            has_repetition, full_text = self._detect_repetition(full_text)
+            if has_repetition:
+                print("⚠ Excessive repetition detected and truncated")
+                print("  Consider using a larger model (small/medium) for better quality")
+
+            # Validate transcription quality
+            if not self._validate_transcription_quality(full_text):
+                print("⚠ WARNING: Transcription quality appears low")
+                print("  This may indicate hallucination or model issues")
+                print("  Consider using a larger model or different audio preprocessing")
 
             # Apply dictionary corrections if available
             if self.corrector:
@@ -415,6 +453,101 @@ class VideoTranscriber:
             # Cleanup temporary audio file
             if audio_path.exists():
                 audio_path.unlink()
+
+    @staticmethod
+    def _detect_repetition(text: str, max_repetitions: int = 5) -> Tuple[bool, str]:
+        """
+        Detect excessive word repetition (hallucination) in text.
+
+        Whisper models, especially smaller ones, can hallucinate by repeating
+        the same word or phrase many times (e.g., "then then then then...").
+
+        Args:
+            text: Text to check for repetition
+            max_repetitions: Maximum allowed consecutive repetitions of the same word
+
+        Returns:
+            Tuple of (has_repetition, cleaned_text)
+            - has_repetition: True if excessive repetition was detected
+            - cleaned_text: Text with excessive repetitions truncated
+        """
+        if not text or not text.strip():
+            return False, text
+
+        # Split into words
+        words = text.split()
+        if len(words) < max_repetitions:
+            return False, text
+
+        # Track consecutive repetitions
+        has_repetition = False
+        cleaned_words = []
+        i = 0
+
+        while i < len(words):
+            word = words[i]
+
+            # Count how many times this word repeats consecutively
+            repetition_count = 1
+            while (i + repetition_count < len(words) and
+                   words[i + repetition_count].lower() == word.lower()):
+                repetition_count += 1
+
+            if repetition_count > max_repetitions:
+                # Excessive repetition detected
+                has_repetition = True
+                # Keep only max_repetitions occurrences
+                cleaned_words.extend([word] * max_repetitions)
+                # Log the truncation
+                print(f"⚠ Detected excessive repetition: '{word}' repeated {repetition_count} times (truncated to {max_repetitions})")
+                i += repetition_count
+            else:
+                # Normal case - keep all occurrences
+                cleaned_words.extend([word] * repetition_count)
+                i += repetition_count
+
+        cleaned_text = " ".join(cleaned_words)
+        return has_repetition, cleaned_text
+
+    @staticmethod
+    def _validate_transcription_quality(text: str, min_unique_words: int = 10) -> bool:
+        """
+        Validate that transcription has reasonable quality.
+
+        Low-quality transcriptions (hallucinations) often have:
+        - Very few unique words
+        - Excessive repetition
+        - Very short length despite long audio
+
+        Args:
+            text: Transcribed text to validate
+            min_unique_words: Minimum number of unique words expected
+
+        Returns:
+            True if quality seems acceptable, False otherwise
+        """
+        if not text or not text.strip():
+            return False
+
+        # Strip speaker labels for analysis
+        text_without_labels = re.sub(r'(?:^|\n)[A-Z_]+\d*:\s*', ' ', text)
+
+        words = text_without_labels.lower().split()
+        if not words:
+            return False
+
+        unique_words = set(words)
+        unique_ratio = len(unique_words) / len(words)
+
+        # Low unique ratio suggests hallucination
+        if unique_ratio < 0.1 and len(unique_words) < min_unique_words:
+            print(f"⚠ Low transcription quality detected:")
+            print(f"  Total words: {len(words)}")
+            print(f"  Unique words: {len(unique_words)}")
+            print(f"  Unique ratio: {unique_ratio:.2%}")
+            return False
+
+        return True
 
     def _build_full_text(self, segments: List[TranscriptionSegment]) -> str:
         """Build full text from segments with speaker labels."""

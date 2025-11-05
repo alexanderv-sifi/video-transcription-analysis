@@ -103,6 +103,16 @@ def main() -> None:
 
     args = parser.parse_args()
 
+    # Expand ~ in paths
+    args.video_path = args.video_path.expanduser()
+    if args.speaker_db:
+        args.speaker_db = args.speaker_db.expanduser()
+    if args.vocabulary:
+        args.vocabulary = args.vocabulary.expanduser()
+    if args.corrections:
+        args.corrections = args.corrections.expanduser()
+    args.output_dir = args.output_dir.expanduser()
+
     if not args.video_path.exists():
         print(f"Error: Video file not found: {args.video_path}")
         sys.exit(1)

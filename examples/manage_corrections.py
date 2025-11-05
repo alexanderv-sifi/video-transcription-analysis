@@ -6,7 +6,7 @@ Usage:
     # Add a correction rule
     python manage_corrections.py add "as was" "AdsWizz"
     python manage_corrections.py add "Ed wiz" "AdsWizz"
-    python manage_corrections.py add "TLS 1\.2" "TLS 1.2" --case-sensitive
+    python manage_corrections.py add "TLS 1\\.2" "TLS 1.2" --case-sensitive
 
     # Remove a correction rule
     python manage_corrections.py remove "as was"
