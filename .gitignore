@@ -1,0 +1,96 @@
+# Video files
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.flv
+*.wmv
+*.webm
+
+# Audio files
+*.wav
+*.mp3
+*.m4a
+*.flac
+*.aac
+
+# Transcripts and output
+output/
+*.srt
+transcripts/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+ENV/
+env/
+.venv
+
+# Models and pretrained data
+pretrained_models/
+models/
+*.pth
+*.pt
+*.ckpt
+*.safetensors
+
+# Databases (example files only, keep templates)
+speakers.json
+vocabulary.yaml
+corrections.yaml
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Environment variables
+.env
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Logs
+*.log
+logs/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Test files
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.claude/settings.local.json
