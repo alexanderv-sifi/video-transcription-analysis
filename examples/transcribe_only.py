@@ -49,8 +49,8 @@ def main() -> None:
         "--model",
         type=str,
         default="medium",
-        choices=["tiny", "base", "small", "medium", "large", "turbo"],
-        help="Whisper model size (default: medium, ~25 min for 1-hour video)",
+        choices=["tiny", "base", "small", "medium", "large", "turbo", "large-v3-turbo"],
+        help="Whisper model size (default: medium, large-v3-turbo for 5x speed)",
     )
     parser.add_argument(
         "--output-dir",

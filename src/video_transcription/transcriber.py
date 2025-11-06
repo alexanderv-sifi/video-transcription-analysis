@@ -174,9 +174,10 @@ class VideoTranscriber:
             print("Loading speaker diarization pipeline...")
 
             try:
-                # Load pipeline without explicit token - uses cached models or HF_TOKEN from environment
+                # Load Precision-2 pipeline (4.0) - 15% improvement over baseline
+                # Uses cached models or HF_TOKEN from environment
                 self.diarization_pipeline = Pipeline.from_pretrained(
-                    "pyannote/speaker-diarization-3.1"
+                    "pyannote/speaker-diarization-4.0"
                 )
 
                 # Optimize for Apple Silicon MPS if available
@@ -471,20 +472,68 @@ class VideoTranscriber:
                     .run(capture_stdout=True, capture_stderr=True, quiet=True)
                 )
 
-                # Check if voice matches existing speaker
-                known_name, confidence = self.speaker_db.identify_speaker(segment_path)
+                # Check for voice match conflict (same voice, different name)
+                conflict = self.speaker_db.detect_voice_match_conflict(
+                    mapping.name, segment_path
+                )
 
-                if known_name:
-                    if known_name.lower() != mapping.name.lower():
+                if conflict:
+                    # Voice matches existing speaker but name differs
+                    existing_uuid, existing_name, conf = conflict
+
+                    # Try auto-resolution with alias
+                    if self.speaker_db.auto_resolve_alias(mapping.name, existing_uuid, conf):
                         print(
-                            f"\n⚠ Voice mismatch for '{mapping.name}':"
+                            f"\n✓ '{mapping.name}' recognized as '{existing_name}' "
+                            f"(alias auto-created, {conf:.0%} confidence)"
+                        )
+                        # Update segments to use canonical name
+                        for seg in speaker_segments:
+                            seg.speaker = existing_name
+                    else:
+                        # Confidence too low for auto-resolution
+                        print(
+                            f"\n⚠ Voice similarity detected for '{mapping.name}':"
                         )
                         print(f"  Detected name: {mapping.name}")
-                        print(f"  Known voice: {known_name} ({confidence:.0%} confidence)")
-                        print(f"  This may be the same person with different names.")
+                        print(f"  Similar to: {existing_name} ({conf:.0%} confidence)")
+                        print(f"  Not auto-resolved (confidence < {self.speaker_db.conflict_config.alias_auto_threshold:.0%})")
+                        print(f"  You may want to manually create an alias if these are the same person.")
+
+                elif self.speaker_db.get_speaker_by_name(mapping.name):
+                    # Speaker already exists with this exact name - skip enrollment
+                    print(f"\n✓ '{mapping.name}' already enrolled")
+
                 else:
+                    # Check for name collision (different voices, same name)
+                    collision = self.speaker_db.detect_name_collision(mapping.name, segment_path)
+
+                    enrollment_name = mapping.name
+
+                    if collision:
+                        # Try auto-disambiguation
+                        disambiguated = self.speaker_db.auto_resolve_disambiguation(
+                            mapping.name, collision, segment_path
+                        )
+
+                        if disambiguated:
+                            enrollment_name = disambiguated
+                            print(
+                                f"\n⚠ Another speaker named '{mapping.name}' exists with different voice"
+                            )
+                            print(f"  Auto-disambiguating as: '{enrollment_name}'")
+                        else:
+                            # Can't auto-resolve - warn user
+                            print(
+                                f"\n⚠ Name collision detected for '{mapping.name}':"
+                            )
+                            print(f"  Another speaker with this name already exists")
+                            print(f"  Voice similarity too ambiguous for auto-disambiguation")
+                            print(f"  Skipping enrollment - consider using a unique name")
+                            continue
+
                     # New speaker - auto-enroll with best segments
-                    print(f"\n🆕 New speaker detected: '{mapping.name}'")
+                    print(f"\n🆕 New speaker detected: '{enrollment_name}'")
                     print(f"   Confidence: {mapping.confidence:.0%}")
                     print(f"   Auto-enrolling for future recognition...")
 
@@ -511,9 +560,9 @@ class VideoTranscriber:
                             )
                             enrollment_paths.append(enroll_path)
 
-                        # Enroll with all samples
-                        self.speaker_db.enroll_speaker(mapping.name, enrollment_paths)
-                        print(f"   ✓ Enrolled '{mapping.name}' with {len(enrollment_paths)} voice samples")
+                        # Enroll with all samples (use disambiguated name if needed)
+                        self.speaker_db.enroll_speaker(enrollment_name, enrollment_paths)
+                        print(f"   ✓ Enrolled '{enrollment_name}' with {len(enrollment_paths)} voice samples")
                         print(f"   (Will be recognized automatically in future calls)")
 
                         # Cleanup enrollment files
@@ -648,8 +697,11 @@ class VideoTranscriber:
             # Build correct model path (naming is inconsistent in mlx-community)
             # tiny and turbo: no -mlx suffix
             # base, small, medium, large: -mlx suffix
+            # large-v3-turbo: special case with explicit version
             if self.model_name in ["tiny", "turbo"]:
                 model_path = f"mlx-community/whisper-{self.model_name}"
+            elif self.model_name == "large-v3-turbo":
+                model_path = "mlx-community/whisper-large-v3-turbo"
             else:
                 model_path = f"mlx-community/whisper-{self.model_name}-mlx"
 
