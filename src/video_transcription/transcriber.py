@@ -172,26 +172,12 @@ class VideoTranscriber:
         """Load the speaker diarization pipeline."""
         if self.enable_diarization and self.diarization_pipeline is None:
             print("Loading speaker diarization pipeline...")
-            if not self.hf_token:
-                print("WARNING: No HuggingFace token provided. Diarization may not work.")
-                print("Set HF_TOKEN environment variable or pass hf_token parameter.")
-                print("Get token from: https://huggingface.co/settings/tokens")
-                self.enable_diarization = False
-                return
 
             try:
-                # pyannote.audio API changed: try 'token' first (newer), fall back to 'use_auth_token' (3.x)
-                try:
-                    self.diarization_pipeline = Pipeline.from_pretrained(
-                        "pyannote/speaker-diarization-3.1",
-                        token=self.hf_token
-                    )
-                except TypeError:
-                    # Fall back to older parameter name
-                    self.diarization_pipeline = Pipeline.from_pretrained(
-                        "pyannote/speaker-diarization-3.1",
-                        use_auth_token=self.hf_token
-                    )
+                # Load pipeline without explicit token - uses cached models or HF_TOKEN from environment
+                self.diarization_pipeline = Pipeline.from_pretrained(
+                    "pyannote/speaker-diarization-3.1"
+                )
 
                 # Optimize for Apple Silicon MPS if available
                 if torch.backends.mps.is_available():
@@ -201,6 +187,8 @@ class VideoTranscriber:
                 print("✓ Diarization pipeline loaded")
             except Exception as e:
                 print(f"WARNING: Failed to load diarization pipeline: {e}")
+                print("If models aren't cached, set HF_TOKEN in .env or run: huggingface-cli login")
+                print("Get token from: https://huggingface.co/settings/tokens")
                 print("Continuing without speaker diarization...")
                 self.enable_diarization = False
 
@@ -222,8 +210,19 @@ class VideoTranscriber:
 
         print("Performing speaker diarization...")
         try:
-            # Run diarization
-            output = self.diarization_pipeline(str(audio_path))
+            # Load audio with torchaudio (avoids torchcodec FFmpeg dependency issue)
+            import torchaudio
+
+            waveform, sample_rate = torchaudio.load(str(audio_path))
+
+            # Pass as dictionary (pyannote.audio 4.0 supports pre-loaded audio)
+            audio_dict = {
+                "waveform": waveform,
+                "sample_rate": sample_rate
+            }
+
+            # Run diarization with pre-loaded audio
+            output = self.diarization_pipeline(audio_dict)
 
             # pyannote.audio 4.0+ uses .speaker_diarization attribute
             # older versions return an Annotation object directly with itertracks()

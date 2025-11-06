@@ -366,8 +366,18 @@ class SpeakerDatabase:
         Raises:
             Exception: If embedding extraction fails
         """
+        # Load audio with torchaudio (speechbrain expects tensor input)
+        import torchaudio
+
+        waveform, sample_rate = torchaudio.load(str(audio_path))
+
+        # Resample to 16kHz if needed (ECAPA-TDNN is trained on 16kHz)
+        if sample_rate != 16000:
+            resampler = torchaudio.transforms.Resample(sample_rate, 16000)
+            waveform = resampler(waveform)
+
         # Encode audio to embedding
-        emb = self.model.encode_batch(str(audio_path))
+        emb = self.model.encode_batch(waveform)
 
         # Convert to numpy and squeeze batch dimension
         emb_np = emb.squeeze().cpu().numpy()
