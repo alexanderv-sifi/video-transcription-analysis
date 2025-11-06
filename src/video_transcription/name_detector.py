@@ -156,7 +156,7 @@ class SpeakerNameDetector:
         return detections
 
     def detect_from_video_labels(
-        self, video_path: Path, sample_fps: float = 0.5
+        self, video_path: Path, sample_fps: float = 1.0
     ) -> List[NameDetection]:
         """
         Extract names from video using OCR on Zoom/Teams labels.
@@ -192,6 +192,7 @@ class SpeakerNameDetector:
             print(f"Scanning video for name labels (sampling at {sample_fps} FPS)...")
 
             frame_num = 0
+            all_text_found = []  # Debug: track all OCR text
             while frame_num < total_frames:
                 cap.set(cv2.CAP_PROP_POS_FRAMES, frame_num)
                 ret, frame = cap.read()
@@ -200,8 +201,16 @@ class SpeakerNameDetector:
 
                 timestamp = frame_num / fps
 
+                # Focus on top 20% of frame where Zoom/Teams labels typically appear
+                height = frame.shape[0]
+                top_region = frame[0:int(height * 0.2), :]
+
                 # Extract text from frame using OCR
-                text_items = self._ocr_frame(frame)
+                text_items = self._ocr_frame(top_region)
+
+                # Debug: collect all text for analysis
+                if text_items:
+                    all_text_found.extend(text_items)
 
                 # Filter for potential names
                 for text in text_items:
@@ -217,6 +226,13 @@ class SpeakerNameDetector:
                         )
 
                 frame_num += frame_interval
+
+            # Debug: show what OCR found (even if not valid names)
+            if all_text_found:
+                unique_text = set(all_text_found)
+                print(f"  OCR detected {len(unique_text)} unique text items:")
+                for text in sorted(unique_text)[:20]:  # Show first 20
+                    print(f"    - '{text}'")
 
             cap.release()
 
@@ -242,22 +258,35 @@ class SpeakerNameDetector:
             List of text strings found in frame
         """
         try:
-            import ocrmac
-            from PIL import Image
+            from ocrmac import ocrmac as ocr_module
+            from PIL import Image, ImageEnhance
 
             # Convert BGR to RGB
             frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
+            # Upscale for better OCR (2x)
+            height, width = frame_rgb.shape[:2]
+            frame_rgb = cv2.resize(frame_rgb, (width * 2, height * 2), interpolation=cv2.INTER_CUBIC)
+
             # Convert to PIL Image
             pil_image = Image.fromarray(frame_rgb)
 
-            # Run OCR using Apple Vision framework
-            annotations = ocrmac.OCR(pil_image).recognize()
+            # Enhance contrast to make small text more readable
+            enhancer = ImageEnhance.Contrast(pil_image)
+            pil_image = enhancer.enhance(2.0)
 
-            # Extract text from all annotations
+            # Run OCR using Apple Vision framework
+            # Returns: List[(text, confidence, (x, y, width, height))]
+            results = ocr_module.text_from_image(
+                pil_image,
+                recognition_level="accurate",
+                confidence_threshold=0.3  # Filter low-confidence results
+            )
+
+            # Extract text from results
             texts = []
-            for annotation in annotations:
-                text = annotation.get("text", "").strip()
+            for text, confidence, bbox in results:
+                text = text.strip()
                 if text:
                     texts.append(text)
 
