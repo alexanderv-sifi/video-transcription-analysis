@@ -100,6 +100,21 @@ def main() -> None:
         type=str,
         help="Domain context for LLM corrections (e.g., 'Ad tech platform')",
     )
+    parser.add_argument(
+        "--auto-detect-names",
+        action="store_true",
+        help="Auto-detect speaker names from video/transcript (Zoom/Teams labels, introductions)",
+    )
+    parser.add_argument(
+        "--no-ocr-names",
+        action="store_true",
+        help="Disable OCR-based name detection from video labels",
+    )
+    parser.add_argument(
+        "--no-ner-names",
+        action="store_true",
+        help="Disable NER-based name detection from transcript",
+    )
 
     args = parser.parse_args()
 
@@ -129,6 +144,9 @@ def main() -> None:
         ollama_url=args.ollama_url,
         ollama_model=args.ollama_model,
         domain_context=args.domain_context,
+        auto_detect_names=args.auto_detect_names,
+        enable_ocr_names=not args.no_ocr_names,
+        enable_ner_names=not args.no_ner_names,
     )
 
     # Transcribe

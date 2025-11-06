@@ -14,6 +14,7 @@ from pyannote.audio import Pipeline
 
 from .corrector import DictionaryCorrector
 from .llm_corrector import LLMCorrector
+from .name_detector import SpeakerNameDetector
 from .speaker_db import SpeakerDatabase
 from .vocabulary import VocabularyManager
 
@@ -50,6 +51,9 @@ class VideoTranscriber:
         ollama_url: str = "http://localhost:11434",
         ollama_model: str = "llama3.2",
         domain_context: Optional[str] = None,
+        auto_detect_names: bool = False,
+        enable_ocr_names: bool = True,
+        enable_ner_names: bool = True,
     ):
         """
         Initialize the transcriber with MLX-accelerated Whisper for Apple Silicon.
@@ -65,12 +69,16 @@ class VideoTranscriber:
             ollama_url: URL for Ollama API
             ollama_model: Ollama model for corrections
             domain_context: Optional domain context for LLM corrections
+            auto_detect_names: Enable automatic speaker name detection from video/transcript
+            enable_ocr_names: Use OCR to detect names from video labels (Zoom/Teams)
+            enable_ner_names: Use NER to detect names from transcript
 
         Note:
             MLX automatically uses GPU acceleration on Apple Silicon (M1/M2/M3).
             Diarization pipeline will use MPS (Metal Performance Shaders) if available.
             Speaker identification, vocabulary, and corrections are optional enhancements.
             LLM corrections are the slowest tier and optional (requires Ollama running).
+            Name detection finds speaker names automatically and can suggest enrollments.
         """
         self.model_name = model_name
         self.enable_diarization = enable_diarization
@@ -101,10 +109,14 @@ class VideoTranscriber:
         self.ollama_url = ollama_url
         self.ollama_model = ollama_model
         self.domain_context = domain_context
+        self.auto_detect_names = auto_detect_names
+        self.enable_ocr_names = enable_ocr_names
+        self.enable_ner_names = enable_ner_names
         self._speaker_db: Optional[SpeakerDatabase] = None
         self._vocabulary: Optional[VocabularyManager] = None
         self._corrector: Optional[DictionaryCorrector] = None
         self._llm_corrector: Optional[LLMCorrector] = None
+        self._name_detector: Optional[SpeakerNameDetector] = None
 
     @property
     def speaker_db(self) -> Optional[SpeakerDatabase]:
@@ -145,6 +157,17 @@ class VideoTranscriber:
             )
         return self._llm_corrector
 
+    @property
+    def name_detector(self) -> Optional[SpeakerNameDetector]:
+        """Lazy-load name detector."""
+        if self._name_detector is None and self.auto_detect_names:
+            print("Initializing speaker name detector...")
+            self._name_detector = SpeakerNameDetector(
+                enable_ocr=self.enable_ocr_names,
+                enable_ner=self.enable_ner_names
+            )
+        return self._name_detector
+
     def _load_diarization_pipeline(self) -> None:
         """Load the speaker diarization pipeline."""
         if self.enable_diarization and self.diarization_pipeline is None:
@@ -157,11 +180,18 @@ class VideoTranscriber:
                 return
 
             try:
-                # pyannote.audio 3.x uses 'use_auth_token', 4.x uses 'token'
-                self.diarization_pipeline = Pipeline.from_pretrained(
-                    "pyannote/speaker-diarization-3.1",
-                    use_auth_token=self.hf_token
-                )
+                # pyannote.audio API changed: try 'token' first (newer), fall back to 'use_auth_token' (3.x)
+                try:
+                    self.diarization_pipeline = Pipeline.from_pretrained(
+                        "pyannote/speaker-diarization-3.1",
+                        token=self.hf_token
+                    )
+                except TypeError:
+                    # Fall back to older parameter name
+                    self.diarization_pipeline = Pipeline.from_pretrained(
+                        "pyannote/speaker-diarization-3.1",
+                        use_auth_token=self.hf_token
+                    )
 
                 # Optimize for Apple Silicon MPS if available
                 if torch.backends.mps.is_available():
@@ -331,6 +361,245 @@ class VideoTranscriber:
 
         return segments
 
+    def _detect_and_map_names(
+        self, segments: List[TranscriptionSegment], video_path: Path, audio_path: Path
+    ) -> List[TranscriptionSegment]:
+        """
+        Detect speaker names and map them to speaker labels.
+
+        Uses multi-source detection:
+        1. OCR from video labels (Zoom/Teams names)
+        2. NER from transcript (introductions, mentions)
+        3. Pattern matching ("Hi, I'm Alex...")
+
+        Then intelligently maps detected names to SPEAKER_XX labels
+        and optionally offers to enroll new speakers.
+
+        Args:
+            segments: Transcription segments with speaker labels
+            video_path: Path to video file
+            audio_path: Path to extracted audio
+
+        Returns:
+            Segments with updated speaker names
+        """
+        if not self.name_detector:
+            return segments
+
+        print("\n" + "=" * 60)
+        print("Auto-Detecting Speaker Names")
+        print("=" * 60)
+
+        all_detections = []
+
+        # Detect from video labels (OCR)
+        if self.enable_ocr_names:
+            ocr_detections = self.name_detector.detect_from_video_labels(video_path)
+            all_detections.extend(ocr_detections)
+
+        # Detect from transcript (NER + patterns)
+        if self.enable_ner_names:
+            full_text = self._build_full_text(segments)
+            ner_detections = self.name_detector.detect_from_transcript(full_text)
+            all_detections.extend(ner_detections)
+
+        if not all_detections:
+            print("✗ No speaker names detected")
+            print("=" * 60)
+            return segments
+
+        # Map names to speakers
+        mappings = self.name_detector.map_names_to_speakers(segments, all_detections)
+
+        # Print summary
+        self.name_detector.print_detection_summary(all_detections, mappings)
+
+        # Apply mappings to segments
+        if mappings:
+            for seg in segments:
+                if seg.speaker in mappings:
+                    mapping = mappings[seg.speaker]
+                    seg.speaker = mapping.name
+
+            # Check for unknown speakers and offer enrollment
+            self._offer_speaker_enrollment(segments, mappings, audio_path)
+
+        return segments
+
+    def _offer_speaker_enrollment(
+        self,
+        segments: List[TranscriptionSegment],
+        mappings: Dict[str, any],  # Dict[str, SpeakerNameMapping]
+        audio_path: Path,
+    ) -> None:
+        """
+        Offer to enroll newly detected speakers in the database.
+
+        Args:
+            segments: Transcription segments
+            mappings: Speaker name mappings
+            audio_path: Path to audio file
+        """
+        if not self.speaker_db:
+            return
+
+        print("\n" + "=" * 60)
+        print("Speaker Enrollment")
+        print("=" * 60)
+
+        for speaker_label, mapping in mappings.items():
+            # Check if this speaker is already in database
+            # Extract a sample segment for this speaker
+            speaker_segments = [s for s in segments if s.speaker == mapping.name]
+            if not speaker_segments:
+                continue
+
+            # Use longest segment for identification
+            longest_seg = max(speaker_segments, key=lambda s: s.end - s.start)
+
+            # Extract audio segment
+            try:
+                with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_seg:
+                    segment_path = Path(temp_seg.name)
+
+                # Extract audio segment using ffmpeg
+                (
+                    ffmpeg.input(
+                        str(audio_path), ss=longest_seg.start, t=longest_seg.end - longest_seg.start
+                    )
+                    .output(str(segment_path), acodec="pcm_s16le", ac=1, ar="16k")
+                    .overwrite_output()
+                    .run(capture_stdout=True, capture_stderr=True, quiet=True)
+                )
+
+                # Check if voice matches existing speaker
+                known_name, confidence = self.speaker_db.identify_speaker(segment_path)
+
+                if known_name:
+                    if known_name.lower() != mapping.name.lower():
+                        print(
+                            f"\n⚠ Voice mismatch for '{mapping.name}':"
+                        )
+                        print(f"  Detected name: {mapping.name}")
+                        print(f"  Known voice: {known_name} ({confidence:.0%} confidence)")
+                        print(f"  This may be the same person with different names.")
+                else:
+                    # New speaker - auto-enroll with best segments
+                    print(f"\n🆕 New speaker detected: '{mapping.name}'")
+                    print(f"   Confidence: {mapping.confidence:.0%}")
+                    print(f"   Auto-enrolling for future recognition...")
+
+                    # Collect best segments for enrollment (3-5 diverse samples)
+                    enrollment_segments = self._select_enrollment_segments(
+                        speaker_segments, target_count=3
+                    )
+
+                    # Enroll speaker with selected segments
+                    try:
+                        enrollment_paths = []
+                        for i, seg in enumerate(enrollment_segments):
+                            with tempfile.NamedTemporaryFile(
+                                suffix=f"_{i}.wav", delete=False
+                            ) as temp_enroll:
+                                enroll_path = Path(temp_enroll.name)
+
+                            # Extract segment
+                            (
+                                ffmpeg.input(str(audio_path), ss=seg.start, t=seg.end - seg.start)
+                                .output(str(enroll_path), acodec="pcm_s16le", ac=1, ar="16k")
+                                .overwrite_output()
+                                .run(capture_stdout=True, capture_stderr=True, quiet=True)
+                            )
+                            enrollment_paths.append(enroll_path)
+
+                        # Enroll with all samples
+                        self.speaker_db.enroll_speaker(mapping.name, enrollment_paths)
+                        print(f"   ✓ Enrolled '{mapping.name}' with {len(enrollment_paths)} voice samples")
+                        print(f"   (Will be recognized automatically in future calls)")
+
+                        # Cleanup enrollment files
+                        for path in enrollment_paths:
+                            if path.exists():
+                                path.unlink()
+
+                    except Exception as e:
+                        print(f"   ⚠ Auto-enrollment failed: {e}")
+                        print(f"   To enroll manually later, use:")
+                        print(f"   python examples/enroll_speaker.py enroll \"{mapping.name}\" <audio_samples>")
+
+                # Cleanup
+                if segment_path.exists():
+                    segment_path.unlink()
+
+            except Exception as e:
+                print(f"  ✗ Failed to check enrollment for {mapping.name}: {e}")
+
+        print("=" * 60)
+
+    def _select_enrollment_segments(
+        self, segments: List[TranscriptionSegment], target_count: int = 3
+    ) -> List[TranscriptionSegment]:
+        """
+        Select best segments for speaker enrollment.
+
+        Chooses diverse, high-quality segments spread throughout the recording.
+
+        Criteria:
+        - Segment length (prefer 10-30 seconds)
+        - Temporal diversity (spread across recording)
+        - Speech density (prefer segments with more speech)
+
+        Args:
+            segments: All segments for this speaker
+            target_count: Number of segments to select
+
+        Returns:
+            List of selected segments for enrollment
+        """
+        if not segments:
+            return []
+
+        # Filter segments by length (10-30 seconds ideal)
+        good_segments = []
+        for seg in segments:
+            duration = seg.end - seg.start
+            if 10 <= duration <= 30:
+                good_segments.append((seg, duration))
+            elif 5 <= duration < 10:
+                # Acceptable but not ideal
+                good_segments.append((seg, duration * 0.8))
+            elif 30 < duration <= 60:
+                # Too long but usable
+                good_segments.append((seg, duration * 0.6))
+
+        if not good_segments:
+            # Fall back to any segments
+            good_segments = [(seg, seg.end - seg.start) for seg in segments]
+
+        # Sort by quality score (duration-based)
+        good_segments.sort(key=lambda x: x[1], reverse=True)
+
+        # Select diverse segments (spread across time)
+        if len(good_segments) <= target_count:
+            return [seg for seg, _ in good_segments]
+
+        # Divide recording into time buckets and pick best from each
+        segments_by_time = sorted(good_segments, key=lambda x: x[0].start)
+        selected = []
+
+        bucket_size = len(segments_by_time) // target_count
+        for i in range(target_count):
+            bucket_start = i * bucket_size
+            bucket_end = bucket_start + bucket_size if i < target_count - 1 else len(segments_by_time)
+            bucket = segments_by_time[bucket_start:bucket_end]
+
+            if bucket:
+                # Pick best segment from this time bucket
+                best = max(bucket, key=lambda x: x[1])
+                selected.append(best[0])
+
+        return selected
+
     def extract_audio(self, video_path: Path, audio_path: Path) -> None:
         """
         Extract audio from video file.
@@ -407,6 +676,10 @@ class VideoTranscriber:
                 # Try to identify speakers using speaker database
                 if self.speaker_db:
                     segments = self._identify_speakers(segments, audio_path)
+
+                # Auto-detect speaker names from video/transcript
+                if self.name_detector:
+                    segments = self._detect_and_map_names(segments, video_path, audio_path)
 
             # Build full text with speaker labels
             full_text = self._build_full_text(segments)

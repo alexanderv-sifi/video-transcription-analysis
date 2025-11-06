@@ -19,6 +19,8 @@ dependencies = [
     "speechbrain>=1.0.0,<2.0",
     "scipy>=1.10.0",
     "pyyaml>=6.0",
+    "spacy>=3.7.0",
+    "ocrmac>=0.1.3; sys_platform == 'darwin'",
 ]
 
 [project.optional-dependencies]
